@@ -1813,6 +1813,7 @@ typedef struct _jl_task_t {
 // hidden state:
     // saved gc stack top for context switches
     jl_gcframe_t *gcstack;
+    size_t world_age;
     // quick lookup for current ptls
     jl_tls_states_t *ptls; // == jl_all_tls_states[tid]
     // id of owning thread - does not need to be defined until the task runs
@@ -1852,6 +1853,8 @@ JL_DLLEXPORT void JL_NORETURN jl_rethrow(void);
 JL_DLLEXPORT void JL_NORETURN jl_sig_throw(void);
 JL_DLLEXPORT void JL_NORETURN jl_rethrow_other(jl_value_t *e JL_MAYBE_UNROOTED);
 JL_DLLEXPORT void JL_NORETURN jl_no_exc_handler(jl_value_t *e);
+JL_DLLEXPORT JL_CONST_FUNC jl_gcframe_t **(jl_get_pgcstack)(void) JL_GLOBALLY_ROOTED JL_NOTSAFEPOINT;
+#define jl_current_task (container_of(jl_get_pgcstack(), jl_task_t, gcstack))
 
 #include "locks.h"   // requires jl_task_t definition
 
@@ -2115,11 +2118,11 @@ typedef struct {
     float value;
 } jl_nullable_float32_t;
 
-#define jl_current_task (container_of(jl_get_pgcstack(), jl_task_t, gcstack))
 #define jl_root_task (jl_get_ptls_states()->root_task)
 
 JL_DLLEXPORT jl_value_t *jl_get_current_task(void);
 
+// TODO: we need to pin the task while using this (set pure bit)
 JL_DLLEXPORT jl_jmp_buf *jl_get_safe_restore(void);
 JL_DLLEXPORT void jl_set_safe_restore(jl_jmp_buf *);
 

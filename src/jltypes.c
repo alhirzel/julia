@@ -1766,8 +1766,8 @@ jl_vararg_t *jl_wrap_vararg(jl_value_t *t, jl_value_t *n)
             jl_type_error_rt("Vararg", "type", (jl_value_t*)jl_type_type, t);
         }
     }
-    jl_ptls_t ptls = jl_get_ptls_states();
-    jl_vararg_t *vm = (jl_vararg_t *)jl_gc_alloc(ptls, sizeof(jl_vararg_t), jl_vararg_type);
+    jl_task_t *ct = jl_current_task;
+    jl_vararg_t *vm = (jl_vararg_t *)jl_gc_alloc(ct->ptls, sizeof(jl_vararg_t), jl_vararg_type);
     vm->T = t;
     vm->N = n;
     return vm;

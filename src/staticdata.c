@@ -1510,7 +1510,7 @@ static void jl_save_system_image_to_stream(ios_t *f) JL_GC_DISABLED
     s.relocs = &relocs;
     s.gvar_record = &gvar_record;
     s.fptr_record = &fptr_record;
-    s.ptls = jl_get_ptls_states();
+    s.ptls = jl_current_task->ptls;
     arraylist_new(&s.relocs_list, 0);
     arraylist_new(&s.gctags_list, 0);
     jl_value_t **const*const tags = get_tags();
@@ -1695,7 +1695,7 @@ static void jl_restore_system_image_from_stream(ios_t *f) JL_GC_DISABLED
     s.relocs = &relocs;
     s.gvar_record = &gvar_record;
     s.fptr_record = &fptr_record;
-    s.ptls = jl_get_ptls_states();
+    s.ptls = jl_current_task->ptls;
     arraylist_new(&s.relocs_list, 0);
     arraylist_new(&s.gctags_list, 0);
     jl_value_t **const*const tags = get_tags();

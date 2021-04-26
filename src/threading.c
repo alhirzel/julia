@@ -36,204 +36,228 @@ extern "C" {
 
 #include "threading.h"
 
+static pthread_key_t jl_safe_restore_key;
 static pthread_key_t jl_pgcstack_key;
+
+__attribute__((constructor)) void jl_init_tls(void)
+{
+    pthread_key_create(&jl_safe_restore_key, NULL);
+    pthread_key_create(&jl_pgcstack_key, NULL);
+}
+
+JL_DLLEXPORT jl_jmp_buf *jl_get_safe_restore(void)
+{
+    return pthread_getspecific(jl_safe_restore_key);
+}
+
+JL_DLLEXPORT void jl_set_safe_restore(jl_jmp_buf *sr)
+{
+    pthread_setspecific(jl_safe_restore_key, sr);
+}
+
 JL_CONST_FUNC jl_gcframe_t **jl_get_pgcstack(void) JL_NOTSAFEPOINT
 {
     return pthread_getspecific(jl_pgcstack_key);
 }
+
 void jl_set_pgcstack(jl_gcframe_t **pgcstack) JL_NOTSAFEPOINT
 {
     pthread_setspecific(jl_pgcstack_key, pgcstack);
 }
-__attribute__((constructor)) void jl_init_tls(void)
-{
-    pthread_key_create(&jl_pgcstack_key, NULL);
-}
+
 jl_get_pgcstack_func jl_get_pgcstack_getter(void)
 {
     // for codegen
     return &jl_get_pgcstack;
 }
 
-// The tls_states buffer:
+JL_DLLEXPORT void *jl_get_ptls_states(void)
+{
+    // mostly deprecated: use current_task instead
+    return jl_current_task->ptls;
+}
+
+
+
+//// The tls_states buffer:
+////
+//// On platforms that do not use ELF (i.e. where `__thread` is emulated with
+//// lower level API) (Mac, Windows), we use the platform runtime API to create
+//// TLS variable directly.
+//// This is functionally equivalent to using `__thread` but can be
+//// more efficient since we can have better control over the creation and
+//// initialization of the TLS buffer.
+////
+//// On platforms that use ELF (Linux, FreeBSD), we use a `__thread` variable
+//// as the fallback in the shared object. For better efficiency, we also
+//// create a `__thread` variable in the main executable using a static TLS
+//// model.
+//#if defined(_OS_DARWIN_)
+//// Mac doesn't seem to have static TLS model so the runtime TLS getter
+//// registration will only add overhead to TLS access. The `__thread` variables
+//// are emulated with `pthread_key_t` so it is actually faster to use it directly.
+//static pthread_key_t jl_tls_key;
 //
-// On platforms that do not use ELF (i.e. where `__thread` is emulated with
-// lower level API) (Mac, Windows), we use the platform runtime API to create
-// TLS variable directly.
-// This is functionally equivalent to using `__thread` but can be
-// more efficient since we can have better control over the creation and
-// initialization of the TLS buffer.
+//__attribute__((constructor)) void jl_mac_init_tls(void)
+//{
+//    pthread_key_create(&jl_tls_key, NULL);
+//}
 //
-// On platforms that use ELF (Linux, FreeBSD), we use a `__thread` variable
-// as the fallback in the shared object. For better efficiency, we also
-// create a `__thread` variable in the main executable using a static TLS
-// model.
-#if defined(_OS_DARWIN_)
-// Mac doesn't seem to have static TLS model so the runtime TLS getter
-// registration will only add overhead to TLS access. The `__thread` variables
-// are emulated with `pthread_key_t` so it is actually faster to use it directly.
-static pthread_key_t jl_tls_key;
-
-__attribute__((constructor)) void jl_mac_init_tls(void)
-{
-    pthread_key_create(&jl_tls_key, NULL);
-}
-
-JL_DLLEXPORT jl_ptls_t (jl_get_ptls_states)(void) JL_GLOBALLY_ROOTED
-{
-    void *ptls = pthread_getspecific(jl_tls_key);
-    if (__unlikely(!ptls)) {
-        ptls = calloc(1, sizeof(jl_tls_states_t));
-        pthread_setspecific(jl_tls_key, ptls);
-    }
-    return (jl_ptls_t)ptls;
-}
-
-// This is only used after the tls is already initialized on the thread
-static jl_ptls_t jl_get_ptls_states_fast(void) JL_NOTSAFEPOINT
-{
-    return (jl_ptls_t)pthread_getspecific(jl_tls_key);
-}
-
-jl_get_ptls_states_func jl_get_ptls_states_getter(void)
-{
-    // for codegen
-    return &jl_get_ptls_states_fast;
-}
-
-JL_DLLEXPORT void jl_set_ptls_states_getter(jl_get_ptls_states_func f) { }
-#elif defined(_OS_WINDOWS_)
-// Apparently windows doesn't have a static TLS model (or one that can be
-// reliably used from a shared library) either..... Use `TLSAlloc` instead.
-
-static DWORD jl_tls_key;
-
-// Put this here for now. We can move this out later if we find more use for it.
-BOOLEAN WINAPI DllMain(IN HINSTANCE hDllHandle, IN DWORD nReason,
-                       IN LPVOID Reserved)
-{
-    switch (nReason) {
-    case DLL_PROCESS_ATTACH:
-        jl_tls_key = TlsAlloc();
-        assert(jl_tls_key != TLS_OUT_OF_INDEXES);
-        // Fall through
-    case DLL_THREAD_ATTACH:
-        TlsSetValue(jl_tls_key, calloc(1, sizeof(jl_tls_states_t)));
-        break;
-    case DLL_THREAD_DETACH:
-        free(TlsGetValue(jl_tls_key));
-        TlsSetValue(jl_tls_key, NULL);
-        break;
-    case DLL_PROCESS_DETACH:
-        free(TlsGetValue(jl_tls_key));
-        TlsFree(jl_tls_key);
-        break;
-    }
-    return 1; // success
-}
-
-JL_DLLEXPORT jl_ptls_t (jl_get_ptls_states)(void) JL_GLOBALLY_ROOTED
-{
-#if defined(_CPU_X86_64_)
-    DWORD *plast_error = (DWORD*)(__readgsqword(0x30) + 0x68);
-    DWORD last_error = *plast_error;
-#elif defined(_CPU_X86_)
-    DWORD *plast_error = (DWORD*)(__readfsdword(0x18) + 0x34);
-    DWORD last_error = *plast_error;
-#else
-    DWORD last_error = GetLastError();
-#endif
-    jl_ptls_t state = (jl_ptls_t)TlsGetValue(jl_tls_key);
-#if defined(_CPU_X86_64_)
-    *plast_error = last_error;
-#elif defined(_CPU_X86_)
-    *plast_error = last_error;
-#else
-    SetLastError(last_error);
-#endif
-    return state;
-}
-
-jl_get_ptls_states_func jl_get_ptls_states_getter(void)
-{
-    // for codegen
-    return &jl_get_ptls_states;
-}
-
-JL_DLLEXPORT void jl_set_ptls_states_getter(jl_get_ptls_states_func f) { }
-#else
-// We use the faster static version in the main executable to replace
-// the slower version in the shared object. The code in different libraries
-// or executables, however, have to agree on which version to use.
-// The general solution is to add one more indirection in the C entry point.
+//JL_DLLEXPORT jl_ptls_t (jl_get_ptls_states)(void) JL_GLOBALLY_ROOTED
+//{
+//    void *ptls = pthread_getspecific(jl_tls_key);
+//    if (__unlikely(!ptls)) {
+//        ptls = calloc(1, sizeof(jl_tls_states_t));
+//        pthread_setspecific(jl_tls_key, ptls);
+//    }
+//    return (jl_ptls_t)ptls;
+//}
 //
-// When `ifunc` is available, we can use it to trick the linker to use the
-// real address (`jl_get_ptls_states_static`) directly as the symbol address.
+//// This is only used after the tls is already initialized on the thread
+//static jl_ptls_t jl_get_ptls_states_fast(void) JL_NOTSAFEPOINT
+//{
+//    return (jl_ptls_t)pthread_getspecific(jl_tls_key);
+//}
 //
-// However, since the detection of the static version in `ifunc`
-// is not guaranteed to be reliable, we still need to fallback to the wrapper
-// version as the symbol address if we didn't find the static version in `ifunc`.
-
-// fallback provided for embedding
-static jl_ptls_t jl_get_ptls_states_fallback(void)
-{
-    static __thread jl_tls_states_t tls_states;
-    return &tls_states;
-}
-#  if JL_USE_IFUNC
-JL_DLLEXPORT __attribute__((weak))
-jl_ptls_t jl_get_ptls_states_static(void);
-#  endif
-static jl_ptls_t jl_get_ptls_states_init(void);
-static jl_get_ptls_states_func jl_tls_states_cb = jl_get_ptls_states_init;
-static jl_ptls_t jl_get_ptls_states_init(void)
-{
-    // This 2-step initialization is used to detect calling
-    // `jl_set_ptls_states_getter` after the address of the TLS variables
-    // are used. Since the address of TLS variables should be constant,
-    // changing the getter address can result in weird crashes.
-
-    // This is clearly not thread safe but should be fine since we
-    // make sure the tls states callback is finalized before adding
-    // multiple threads
-    jl_get_ptls_states_func cb = jl_get_ptls_states_fallback;
-#  if JL_USE_IFUNC
-    if (jl_get_ptls_states_static)
-        cb = jl_get_ptls_states_static;
-#  endif
-    jl_tls_states_cb = cb;
-    return cb();
-}
-
-JL_DLLEXPORT void jl_set_ptls_states_getter(jl_get_ptls_states_func f)
-{
-    if (f == jl_tls_states_cb || !f)
-        return;
-    // only allow setting this once
-    if (jl_tls_states_cb == jl_get_ptls_states_init) {
-        jl_tls_states_cb = f;
-    }
-    else {
-        jl_safe_printf("ERROR: Attempt to change TLS address.\n");
-        exit(1);
-    }
-}
-
-JL_DLLEXPORT jl_ptls_t (jl_get_ptls_states)(void) JL_GLOBALLY_ROOTED
-{
-#ifndef __clang_analyzer__
-    return (*jl_tls_states_cb)();
-#endif
-}
-
-jl_get_ptls_states_func jl_get_ptls_states_getter(void)
-{
-    if (jl_tls_states_cb == jl_get_ptls_states_init)
-        jl_get_ptls_states_init();
-    // for codegen
-    return jl_tls_states_cb;
-}
-#endif
+//jl_get_ptls_states_func jl_get_ptls_states_getter(void)
+//{
+//    // for codegen
+//    return &jl_get_ptls_states_fast;
+//}
+//
+//JL_DLLEXPORT void jl_set_ptls_states_getter(jl_get_ptls_states_func f) { }
+//#elif defined(_OS_WINDOWS_)
+//// Apparently windows doesn't have a static TLS model (or one that can be
+//// reliably used from a shared library) either..... Use `TLSAlloc` instead.
+//
+//static DWORD jl_tls_key;
+//
+//// Put this here for now. We can move this out later if we find more use for it.
+//BOOLEAN WINAPI DllMain(IN HINSTANCE hDllHandle, IN DWORD nReason,
+//                       IN LPVOID Reserved)
+//{
+//    switch (nReason) {
+//    case DLL_PROCESS_ATTACH:
+//        jl_tls_key = TlsAlloc();
+//        assert(jl_tls_key != TLS_OUT_OF_INDEXES);
+//        // Fall through
+//    case DLL_THREAD_ATTACH:
+//        TlsSetValue(jl_tls_key, calloc(1, sizeof(jl_tls_states_t)));
+//        break;
+//    case DLL_THREAD_DETACH:
+//        free(TlsGetValue(jl_tls_key));
+//        TlsSetValue(jl_tls_key, NULL);
+//        break;
+//    case DLL_PROCESS_DETACH:
+//        free(TlsGetValue(jl_tls_key));
+//        TlsFree(jl_tls_key);
+//        break;
+//    }
+//    return 1; // success
+//}
+//
+//JL_DLLEXPORT jl_ptls_t (jl_get_ptls_states)(void) JL_GLOBALLY_ROOTED
+//{
+//#if defined(_CPU_X86_64_)
+//    DWORD *plast_error = (DWORD*)(__readgsqword(0x30) + 0x68);
+//    DWORD last_error = *plast_error;
+//#elif defined(_CPU_X86_)
+//    DWORD *plast_error = (DWORD*)(__readfsdword(0x18) + 0x34);
+//    DWORD last_error = *plast_error;
+//#else
+//    DWORD last_error = GetLastError();
+//#endif
+//    jl_ptls_t state = (jl_ptls_t)TlsGetValue(jl_tls_key);
+//#if defined(_CPU_X86_64_)
+//    *plast_error = last_error;
+//#elif defined(_CPU_X86_)
+//    *plast_error = last_error;
+//#else
+//    SetLastError(last_error);
+//#endif
+//    return state;
+//}
+//
+//jl_get_ptls_states_func jl_get_ptls_states_getter(void)
+//{
+//    // for codegen
+//    return &jl_get_ptls_states;
+//}
+//
+//JL_DLLEXPORT void jl_set_ptls_states_getter(jl_get_ptls_states_func f) { }
+//#else
+//// We use the faster static version in the main executable to replace
+//// the slower version in the shared object. The code in different libraries
+//// or executables, however, have to agree on which version to use.
+//// The general solution is to add one more indirection in the C entry point.
+////
+//// When `ifunc` is available, we can use it to trick the linker to use the
+//// real address (`jl_get_ptls_states_static`) directly as the symbol address.
+////
+//// However, since the detection of the static version in `ifunc`
+//// is not guaranteed to be reliable, we still need to fallback to the wrapper
+//// version as the symbol address if we didn't find the static version in `ifunc`.
+//
+//// fallback provided for embedding
+//static jl_ptls_t jl_get_ptls_states_fallback(void)
+//{
+//    static __thread jl_tls_states_t tls_states;
+//    return &tls_states;
+//}
+//#  if JL_USE_IFUNC
+//JL_DLLEXPORT __attribute__((weak))
+//jl_ptls_t jl_get_ptls_states_static(void);
+//#  endif
+//static jl_ptls_t jl_get_ptls_states_init(void);
+//static jl_get_ptls_states_func jl_tls_states_cb = jl_get_ptls_states_init;
+//static jl_ptls_t jl_get_ptls_states_init(void)
+//{
+//    // This 2-step initialization is used to detect calling
+//    // `jl_set_ptls_states_getter` after the address of the TLS variables
+//    // are used. Since the address of TLS variables should be constant,
+//    // changing the getter address can result in weird crashes.
+//
+//    // This is clearly not thread safe but should be fine since we
+//    // make sure the tls states callback is finalized before adding
+//    // multiple threads
+//    jl_get_ptls_states_func cb = jl_get_ptls_states_fallback;
+//#  if JL_USE_IFUNC
+//    if (jl_get_ptls_states_static)
+//        cb = jl_get_ptls_states_static;
+//#  endif
+//    jl_tls_states_cb = cb;
+//    return cb();
+//}
+//
+//JL_DLLEXPORT void jl_set_ptls_states_getter(jl_get_ptls_states_func f)
+//{
+//    if (f == jl_tls_states_cb || !f)
+//        return;
+//    // only allow setting this once
+//    if (jl_tls_states_cb == jl_get_ptls_states_init) {
+//        jl_tls_states_cb = f;
+//    }
+//    else {
+//        jl_safe_printf("ERROR: Attempt to change TLS address.\n");
+//        exit(1);
+//    }
+//}
+//
+//JL_DLLEXPORT jl_ptls_t (jl_get_ptls_states)(void) JL_GLOBALLY_ROOTED
+//{
+//#ifndef __clang_analyzer__
+//    return (*jl_tls_states_cb)();
+//#endif
+//}
+//
+//jl_get_ptls_states_func jl_get_ptls_states_getter(void)
+//{
+//    if (jl_tls_states_cb == jl_get_ptls_states_init)
+//        jl_get_ptls_states_init();
+//    // for codegen
+//    return jl_tls_states_cb;
+//}
+//#endif
 
 jl_ptls_t *jl_all_tls_states JL_GLOBALLY_ROOTED;
 uint8_t *jl_measure_compile_time = NULL;
@@ -248,9 +272,9 @@ JL_DLLEXPORT int16_t jl_threadid(void)
     return ptls->tid;
 }
 
-void jl_init_threadtls(int16_t tid)
+jl_ptls_t jl_init_threadtls(int16_t tid)
 {
-    jl_ptls_t ptls = jl_get_ptls_states();
+    jl_ptls_t ptls = calloc(1, sizeof(jl_tls_states_t));
     ptls->system_id = jl_thread_self();
     seed_cong(&ptls->rngseed);
 #ifdef _OS_WINDOWS_
@@ -263,8 +287,6 @@ void jl_init_threadtls(int16_t tid)
         }
     }
 #endif
-    assert(ptls->world_age == 0);
-    ptls->world_age = 1; // OK to run Julia code on this thread
     ptls->tid = tid;
     ptls->gc_state = 0; // GC unsafe
     // Conditionally initialize the safepoint address. See comment in
@@ -276,22 +298,16 @@ void jl_init_threadtls(int16_t tid)
         ptls->safepoint = (size_t*)(jl_safepoint_pages + jl_page_size * 2 +
                                     sizeof(size_t));
     }
-    ptls->defer_signal = 0;
     jl_bt_element_t *bt_data = (jl_bt_element_t*)
         malloc_s(sizeof(jl_bt_element_t) * (JL_MAX_BT_SIZE + 1));
     memset(bt_data, 0, sizeof(jl_bt_element_t) * (JL_MAX_BT_SIZE + 1));
     ptls->bt_data = bt_data;
-    ptls->sig_exception = NULL;
-    ptls->previous_exception = NULL;
-    ptls->next_task = NULL;
-#ifdef _OS_WINDOWS_
-    ptls->needs_resetstkoflw = 0;
-#endif
     small_arraylist_new(&ptls->locks, 0);
     jl_init_thread_heap(ptls);
-    jl_install_thread_signal_handler(ptls);
 
     jl_all_tls_states[tid] = ptls;
+
+    return ptls;
 }
 
 // lock for code generation
@@ -425,11 +441,6 @@ void jl_init_threading(void)
 #ifndef __clang_analyzer__
     jl_all_tls_states = (jl_ptls_t*)calloc(jl_n_threads, sizeof(void*));
 #endif
-    // initialize this thread (set tid, create heap, etc.)
-    jl_init_threadtls(0);
-
-    // initialize threading infrastructure
-    jl_init_threadinginfra();
 }
 
 static uv_barrier_t thread_init_done;
