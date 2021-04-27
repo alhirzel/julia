@@ -406,6 +406,13 @@ function _partially_inline!(@nospecialize(x), slot_replacements::Vector{Any},
         elseif !is_meta_expr_head(head)
             partially_inline!(x.args, slot_replacements, type_signature, static_param_values,
                               slot_offset, statement_offset, boundscheck)
+            if head === :isdefined
+                arg = x.args[1]
+                # inlining a QuoteNode or literal into `Expr(:isdefined, x)` is invalid, just return true
+                if !(arg isa Union{Core.SlotNumber, GlobalRef, Symbol} || isexpr(arg, :static_parameter))
+                    return true
+                end
+            end
         end
     end
     return x
