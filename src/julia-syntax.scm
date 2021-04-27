@@ -2036,22 +2036,34 @@
                               (- n 1)
                               n))
                         n))
-               (st  (gensy)))
+               (st  (gensy))
+               (end '()))
           `(block
             ,@(if (> n 0) `((local ,st)) '())
             ,@ini
             ,@(map (lambda (i lhs)
-                     (expand-forms
-                       (if (vararg? lhs)
-                           `(= ,(cadr lhs) (call (top rest) ,xx ,@(if (eq? i 0) '() `(,st))))
-                           (lower-tuple-assignment
-                             (if (= i (- n 1))
-                                 (list lhs)
-                                 (list lhs st))
-                             `(call (top indexed_iterate)
-                                    ,xx ,(+ i 1) ,@(if (eq? i 0) '() `(,st)))))))
+                     (let ((lhs- (cond ((or (symbol? lhs) (ssavalue? lhs))
+                                        lhs)
+                                       ((vararg? lhs)
+                                        (if (or (symbol? (cadr lhs)) (ssavalue? (cadr lhs)))
+                                            lhs `(|...| ,(make-ssavalue))))
+                                       (else (make-ssavalue)))))
+                       (if (not (eq? lhs lhs-))
+                           (if (vararg? lhs)
+                               (set! end (cons (expand-forms `(= ,(cadr lhs) ,(cadr lhs-))) end))
+                               (set! end (cons (expand-forms `(= ,lhs ,lhs-)) end))))
+                       (expand-forms
+                         (if (vararg? lhs-)
+                             `(= ,(cadr lhs-) (call (top rest) ,xx ,@(if (eq? i 0) '() `(,st))))
+                             (lower-tuple-assignment
+                               (if (= i (- n 1))
+                                   (list lhs-)
+                                   (list lhs- st))
+                               `(call (top indexed_iterate)
+                                      ,xx ,(+ i 1) ,@(if (eq? i 0) '() `(,st))))))))
                    (iota n)
                    lhss)
+            ,@(reverse end)
             (unnecessary ,xx))))))
 
 ;; move an assignment into the last statement of a block to keep more statements at top level
